@@ -4,7 +4,7 @@ import os
 import glob
 from configparser import ConfigParser
 import re
-from notion.block import PageBlock, TextBlock, CollectionViewBlock, TableBlock, TableRowBlock
+from notion.block import PageBlock, TextBlock, CollectionViewBlock
 from notion.client import NotionClient
 from md2notion.upload import upload
 

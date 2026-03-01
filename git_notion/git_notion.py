@@ -88,15 +88,34 @@ def parse_md_tables(md_content: str):
     return segments
 
 def upload_table_to_notion(page, rows):
-    """Create a Notion TableBlock from parsed table rows."""
+    """Create a Notion simple table from parsed table rows using raw block creation."""
     if not rows:
         return
     col_count = max(len(row) for row in rows)
-    table = page.children.add_new(TableBlock, columns=col_count)
+
+    # Create the table block manually
+    table_id = get_client().create_record(
+        "block",
+        parent=page,
+        type="table",
+        table_width=col_count,
+        has_column_header=True,
+    )
+    table_block = get_client().get_block(table_id)
+
     for row_data in rows:
-        tr = table.children.add_new(TableRowBlock)
-        for j, cell in enumerate(row_data):
-            tr.set_cell(j, cell)
+        row_id = get_client().create_record(
+            "block",
+            parent=table_block,
+            type="table_row",
+        )
+        row_block = get_client().get_block(row_id)
+        # Set cell values
+        cells = [[["", cell]] for cell in row_data]
+        # Pad to col_count
+        while len(cells) < col_count:
+            cells.append([[""]])
+        row_block.set("properties", {str(i): cells[i] for i in range(len(cells))})
 
 def upload_file_to_db(db, filename: str):
     page_title = os.path.basename(filename).replace(".md", "")

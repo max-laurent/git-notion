@@ -4,16 +4,12 @@ import os
 import glob
 from configparser import ConfigParser
 import re
-
-from notion.block import PageBlock
-from notion.block import TextBlock
+from notion.block import PageBlock, TextBlock, CollectionViewBlock
 from notion.client import NotionClient
 from md2notion.upload import upload
 
-
 TOKEN = os.getenv("NOTION_TOKEN_V2", "")
 _client = None
-
 
 def get_client():
     global _client
@@ -21,57 +17,95 @@ def get_client():
         _client = NotionClient(token_v2=TOKEN)
     return _client
 
-
 def get_or_create_page(base_page, title):
-    page = None
+    """Get or create a subpage."""
     for child in base_page.children.filter(PageBlock):
         if child.title == title:
-            page = child
+            return child
+    return base_page.children.add_new(PageBlock, title=title)
 
-    if not page:
-        page = base_page.children.add_new(PageBlock, title=title)
-    return page
+def get_or_create_database(base_page, title):
+    """Get or create a table/database inside a subpage."""
+    for child in base_page.children:
+        if isinstance(child, CollectionViewBlock) and child.collection.name == title:
+            return child
 
+    db = base_page.children.add_new(CollectionViewBlock)
+    db.collection = get_client().get_collection(
+        get_client().create_record("collection", parent=db, schema={
+            "title": {"name": "Name", "type": "title"},
+            "hash":  {"name": "MD5",  "type": "text"},
+        })
+    )
+    db.views.add_new(view_type="table")
+    db.collection.name = title
+    return db
 
-def upload_file(base_page, filename: str, page_title=None):
-    page_title = page_title or filename
-    page = get_or_create_page(base_page, page_title)
+def get_or_create_row(db, page_title):
+    """Get or create a row in the database."""
+    for row in db.collection.get_rows():
+        if row.title == page_title:
+            return row, False
+    row = db.collection.add_row()
+    row.title = page_title
+    return row, True
+
+def upload_file_to_db(db, filename: str):
+    """Upload a markdown file as a row in the database."""
+    page_title = os.path.basename(filename).replace(".md", "")
+
     hasher = hashlib.md5()
     with open(filename, "rb") as mdFile:
-        buf = mdFile.read()
-        hasher.update(buf)
-    if page.children and hasher.hexdigest() in str(page.children[0]):
-        return page
+        hasher.update(mdFile.read())
 
-    for child in page.children:
+    row, is_new = get_or_create_row(db, page_title)
+
+    # Skip if unchanged
+    if not is_new and row.hash == hasher.hexdigest():
+        print(f"  {filename} unchanged, skipping.")
+        return
+
+    # Clear and re-upload content
+    for child in row.children:
         child.remove()
-    page.children.add_new(TextBlock, title=f"MD5: {hasher.hexdigest()}")
+
+    row.hash = hasher.hexdigest()
 
     with open(filename, "r", encoding="utf-8") as mdFile:
-        upload(mdFile, page)
-    return page
+        upload(mdFile, row)
 
-
+    print(f"  {filename} uploaded.")
 
 def sync_to_notion(repo_root: str = "."):
     os.chdir(repo_root)
     config = ConfigParser()
     config.read(os.path.join(repo_root, "setup.cfg"))
+
     root_page_url = os.getenv("NOTION_ROOT_PAGE") or config.get('git-notion', 'notion_root_page')
     ignore_regex = os.getenv("NOTION_IGNORE_REGEX") or config.get('git-notion', 'ignore_regex', fallback=None)
+
     root_page = get_client().get_block(root_page_url)
-    # ↓ removed repo_page = get_or_create_page(root_page, repo_name)
+
+    # Group files by their folder
+    folder_files = {}
     for file in glob.glob("**/*.md", recursive=True):
-        if ignore_regex is None or not re.match(ignore_regex, file):
-            folder = os.path.dirname(file)
-            folder_url = config.get('folders', folder, fallback=None)
-            upload_file(root_page if folder_url is None else get_client().get_block(folder_url), file)
-            if folder_url:
-                print(file, "uploaded to: ", folder_url)
-            else:
-                print(file, "uploaded to: root page")
+        if ignore_regex and re.match(ignore_regex, file):
+            continue
+        folder = os.path.dirname(file) or "root"
+        folder_files.setdefault(folder, []).append(file)
 
+    # For each folder: create subpage → create table → upload files as rows
+    for folder, files in folder_files.items():
+        print(f"\nProcessing folder: {folder}")
 
+        # Support nested folders (e.g. sops/hr → subpage "sops" > subpage "hr")
+        page = root_page
+        for part in folder.split(os.sep):
+            page = get_or_create_page(page, part)
 
-# Example call:
-# sync_to_notion(repo_root="/path/to/repo", config_file_path="notion_config.ini")
+        # One table per subpage, named after the folder
+        db_title = os.path.basename(folder)
+        db = get_or_create_database(page, db_title)
+
+        for file in files:
+            upload_file_to_db(db, file)

@@ -1,5 +1,6 @@
 """Main module."""
 import hashlib
+import io
 import os
 import glob
 from configparser import ConfigParser
@@ -50,6 +51,11 @@ def get_or_create_row(db, page_title):
     row.title = page_title
     return row, True
 
+def strip_md_tables(md_content: str) -> str:
+    """Replace markdown tables with a plain text notice to avoid nested collection errors."""
+    table_pattern = re.compile(r'(\|.+\|\n)+', re.MULTILINE)
+    return table_pattern.sub("[Table: see source file in GitHub]\n", md_content)
+
 def upload_file_to_db(db, filename: str):
     """Upload a markdown file as a row in the database."""
     page_title = os.path.basename(filename).replace(".md", "")
@@ -72,8 +78,13 @@ def upload_file_to_db(db, filename: str):
     row.hash = hasher.hexdigest()
 
     with open(filename, "r", encoding="utf-8") as mdFile:
-        upload(mdFile, row)
+        content = mdFile.read()
 
+    cleaned_content = strip_md_tables(content)
+    cleaned_file = io.StringIO(cleaned_content)
+    cleaned_file.name = filename  # md2notion needs a .name attribute
+
+    upload(cleaned_file, row)
     print(f"  {filename} uploaded.")
 
 def sync_to_notion(repo_root: str = "."):
